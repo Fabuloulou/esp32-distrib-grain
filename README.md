@@ -31,21 +31,53 @@ Ce projet est un système embarqué sur **ESP32** conçu pour automatiser la dis
 
 ---
 
+### **Spécifications Hardware & Connexions GPIO**
+
+* **Microcontrôleur :** ESP32 DEVKIT V1 30 broches (Standard DOIT / NodeMCU 30 pins)[cite: 4, 5, 6].
+* **Alimentation :** L'ESP32 est alimenté par son port USB pour la programmation (hors tension lors des manipulations)[cite: 5]. Le reste du circuit fonctionne sous 12 V DC (moteur, relais) et 3,3 V DC (capteurs, optocoupleurs)[cite: 6].
+
+#### **1. Pont en H MOSFET (Commande Moteur 12V)**
+Pilotage via optocoupleurs PC817[cite: 6]. *Des résistances de pulldown de 10 kΩ maintiennent les LED des optocoupleurs à la masse au repos pour garantir la sécurité[cite: 6].*
+
+| Signal / Rôle | Type MOSFET | Transistor / Direction | GPIO ESP32 |
+| :--- | :--- | :--- | :--- |
+| **AV+** | P-MOS (IRF5210) | Haut Gauche (Rotation Avant, +) | **GPIO18**[cite: 6] |
+| **AV-** | N-MOS (IRFZ44N) | Bas Droit (Rotation Avant, -) | **GPIO17**[cite: 6] |
+| **AR+** | P-MOS (IRF5210) | Haut Droit (Rotation Arrière, +) | **GPIO16**[cite: 6] |
+| **AR-** | N-MOS (IRFZ44N) | Bas Gauche (Rotation Arrière, -) | **GPIO19**[cite: 6] |
+
+* **PWM :** Appliqué sur les bras bas (N-MOS) à une fréquence maximale de **500 Hz** (résolution 8 bits) afin de respecter le temps de réponse des optocoupleurs PC817[cite: 6].
+
+#### **2. Modules de Pesée (HX711 & Jauges 20 kg x2)**
+Alimentés en 3,3 V DC[cite: 6].
+* **Module 1 (HX1) :** Data (DT) sur **GPIO25**, Horloge (SCK) sur **GPIO26**[cite: 4, 6, 7].
+* **Module 2 (HX2) :** Data (DT) sur **GPIO27**, Horloge (SCK) sur **GPIO33**[cite: 4, 6, 7].
+* **Calibration (Étalonné à 26 kg) :** `CALIB_HX1 = 102.5f`, `CALIB_HX2 = 102.07f`[cite: 6, 7].
+
+#### **3. Entrées / Sorties Auxiliaires**
+* **Sortie Alarme Relais (Lampe témoin 12V) :** **GPIO23** (Commande via PC817 + transistor BS170, actif à l'état HIGH)[cite: 6].
+* **Entrée Sélecteur E1 :** **GPIO34** (Input only, commutée à 3,3 V via optocoupleur)[cite: 6].
+* **Entrée Sélecteur E2 :** **GPIO35** (Input only, commutée à 3,3 V via optocoupleur)[cite: 6].
+* **Réservation Écran :** **GPIO21** (SDA) et **GPIO22** (SCL) restent dédiés au bus I2C (ex: écran SH1106)[cite: 4].
+
+---
+
 ## 💬 Commandes Bluetooth (BLE)
 
 L'ESP32 communique sous le nom **`DISTRIBUTEUR-GRAIN`**. Vous pouvez utiliser une application mobile BLE (ex: *Serial Bluetooth Terminal*, *nRF Connect*) pour envoyer les commandes suivantes :
 
 | Commande | Action |
 | :--- | :--- |
-| `RUN` | Lance manuellement un cycle complet de distribution. |
-| `PESEE` | Affiche en temps réel le poids brut (avec machinerie) et le poids net (grain seul). |
-| `TARE` | Recalibre le zéro de la trémie vide, enregistre les offsets en FLASH et réinitialise les compteurs partiels. |
-| `RESET` | Réinitialise uniquement les compteurs partiels (nombre de tirages + poids partiel) sans modifier la tare. |
-| `CONFIG` | Affiche les paramètres actuels (cible, timeout, attente) et tous les compteurs (partiels et globaux). |
-| `CIBLE=xxx` | Définit le poids cible en grammes (ex: `CIBLE=500.0`). |
-| `TIMEOUT=xx` | Définit le temps maximal d'extraction en secondes (ex: `TIMEOUT=30`). |
-| `ATTENTE=xx` | Définit la fenêtre d'attente BLE au démarrage en secondes (ex: `ATTENTE=20`). |
-
+| `DISTRIBUTE` | Lance manuellement un cycle complet de distribution. |
+| `EMPTY` | Vide entièrement la trémie (arrête si le poids varie de moins de X grammes sur l'intervalle configuré). |
+| `WEIGH` | Affiche en temps réel le poids brut (avec machinerie) et le poids net (grain seul). |
+| `ZERO` | Recalibre le zéro de la trémie vide, enregistre les offsets en FLASH et réinitialise les compteurs partiels. |
+| `CLEAR` | Réinitialise uniquement les compteurs partiels (nombre de tirages + poids partiel) sans modifier la tare. |
+| `SHOW` | Affiche les paramètres actuels (cible, timeout, seuils) et tous les compteurs (partiels et globaux). |
+| `SET_TARGET=xxx` | Définit le poids cible en grammes (ex: `SET_TARGET=500.0`). |
+| `SET_TIMEOUT=xx` | Définit le temps maximal d'extraction en secondes (ex: `SET_TIMEOUT=30`). |
+| `SET_EMPTY_THRESHOLD=xxx` | Définit le seuil de variation pour le vidage en grammes (ex: `SET_EMPTY_THRESHOLD=100.0`). |
+| `SET_EMPTY_INTERVAL=xx` | Définit le temps entre deux mesures lors du vidage en secondes (ex: `SET_EMPTY_INTERVAL=30`). |
 ---
 
 ## 📂 Structure du Projet
