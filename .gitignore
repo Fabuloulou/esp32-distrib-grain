@@ -1,0 +1,7 @@
+build/
+.pio/
+.vscode/
+sdkconfig.old
+*.bin
+*.elf
+*.map
