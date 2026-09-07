@@ -401,15 +401,17 @@ void executerCycleDistribution() {
   unsigned long chronoDebut = millis();
   bool distributionReussie = false;
   float grainDistribue = 0.0;
+  int cpt = 0;
 
   while (millis() - chronoDebut < timeoutDistribMs) {
+    cpt++;
     float poidsActuel = lirePoidsTotal(1);
     grainDistribue = poidsInitialReference - poidsActuel;
 
     float pourcentage = (grainDistribue / poidsCibleG) * 100.0;
     if (pourcentage < 0) pourcentage = 0;
 
-    logBT("Extrait : " + String(grainDistribue, 1) + "g / " + String(poidsCibleG, 1) + "g (" + String(pourcentage, 0) + "%) | Grain Restant : " + String(poidsActuel / 1000.0, 2) + "kg");
+    logBT("[" + String(cpt) + "] Extrait : " + String(grainDistribue, 1) + "g / " + String(poidsCibleG, 1) + "g (" + String(pourcentage, 0) + "%) | Grain Restant : " + String(poidsActuel / 1000.0, 2) + "kg");
 
     if (grainDistribue >= poidsCibleG) {
       distributionReussie = true;
@@ -560,13 +562,14 @@ void loop() {
     pServer->startAdvertising();
     oldDeviceConnected = deviceConnected;
   }
+  
+  // Nouvelle détection de connexion avec temporisation
   if (deviceConnected && !oldDeviceConnected) {
     oldDeviceConnected = deviceConnected;
-  }
 
-  if (deviceConnected && nouvelleConnexionBLE) {
-    nouvelleConnexionBLE = false;
-    delay(300);
+    delay(5000); 
+
+    logBT("=== CONNECTE AU DISTRIBUTEUR ===");
     envoyerResumeBluetooth();
   }
 
