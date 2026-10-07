@@ -21,10 +21,11 @@ const int HX2_SCK = 33;
 const float CALIB_HX1 = 102.5f;
 const float CALIB_HX2 = 102.07f;
 
-// VALEURS PAR DÉFAUT (Utilisées au 1er démarrage avant modification BT)
-const float DEFAULT_POIDS_CIBLE_G         = 150.0;     // 150 grammes
-const unsigned long DEFAULT_TIMEOUT_MS    = 60000;     // 60 secondes
-const unsigned long DEFAULT_ATTENTE_BT_SEC = 120;      // 2 minutes (120 secondes)
+// VALEURS PAR DÉFAUT
+const float DEFAULT_POIDS_CIBLE_G          = 100.0;     // 100 grammes
+const unsigned long DEFAULT_TIMEOUT_MS     = 30000;     // 30 secondes
+const float DEFAULT_EMPTY_THRESHOLD_G      = 100.0;     // Seuil de tolérance pour EMPTY (100g)
+const unsigned long DEFAULT_EMPTY_INTERVAL_SEC = 30;    // Temps entre 2 mesures pour EMPTY (30s)
 
 // Paramètres PWM
 const int PWM_FREQ = 500;

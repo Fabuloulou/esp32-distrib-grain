@@ -12,13 +12,13 @@
 #define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 
-// Factorisation du message d'aide pour le Bluetooth
-const String STRING_AIDE_COMMANDES = "Commandes : RUN | PESEE | TARE | RESET | CONFIG | CIBLE=xxx | TIMEOUT=xx | ATTENTE=xx";
+const String STRING_AIDE_COMMANDES = "Commandes : DISTRIBUTE | EMPTY | WEIGH | ZERO | CLEAR | SHOW | SET_TARGET=x | SET_TIMEOUT=x | SET_EMPTY_THRESHOLD=x | SET_EMPTY_INTERVAL=x";
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pTxCharacteristic = NULL;
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
+bool nouvelleConnexionBLE = false;
 String commandeRecue = "";
 
 Preferences preferences;
@@ -30,18 +30,21 @@ long offsetHX1 = 0;
 long offsetHX2 = 0;
 float poidsCibleG = DEFAULT_POIDS_CIBLE_G;
 unsigned long timeoutDistribMs = DEFAULT_TIMEOUT_MS;
-unsigned long attenteBtSec = DEFAULT_ATTENTE_BT_SEC;
+float seuilEmptyG = DEFAULT_EMPTY_THRESHOLD_G;
+unsigned long delaiEmptySec = DEFAULT_EMPTY_INTERVAL_SEC;
 
-// Compteurs globaux (A vie)
+// Compteurs globaux (À vie)
 unsigned long nbDistributions = 0;
 float poidsTotalDistribueG = 0.0;
 
-// Compteurs partiels (Réinitialisables via RESET ou TARE)
+// Compteurs partiels (Réinitialisables via CLEAR ou ZERO)
 unsigned long nbDistributionsPartiel = 0;
 float poidsPartielDistribueG = 0.0;
 
-// Prototype
+// Prototypes
 void executerCycleDistribution();
+void viderTremie();
+void envoyerResumeBluetooth();
 
 // ==========================================
 // CALLBACKS BLE
@@ -49,6 +52,7 @@ void executerCycleDistribution();
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
       deviceConnected = true;
+      nouvelleConnexionBLE = true;
     };
     void onDisconnect(BLEServer* pServer) {
       deviceConnected = false;
@@ -75,7 +79,6 @@ void logBT(String msg) {
   }
 }
 
-// Réinitialisation dédiée des compteurs partiels
 void reinitialiserCompteursPartiels() {
   nbDistributionsPartiel = 0;
   poidsPartielDistribueG = 0.0;
@@ -87,7 +90,7 @@ void reinitialiserCompteursPartiels() {
 }
 
 // ==========================================
-// FONCTIONS MOTEUR ET PESÉE
+// FONCTIONS MOTEUR ET PESÉE SÉCURISÉE
 // ==========================================
 void stopperMoteur() {
   analogWrite(PIN_AV_PLUS, 0);
@@ -122,7 +125,50 @@ void moteurArriere(uint8_t vitesse) {
 float lirePoidsTotal(uint8_t lectures = 3) {
   float p1 = scale1.get_units(lectures);
   float p2 = scale2.get_units(lectures);
-  return p1 + p2;
+  float total = p1 + p2;
+
+  // Filtrage anti-aberration : re-synchro si valeur folle
+  if (total > 30000.0 || total < -5000.0) {
+    Serial.printf("[AVERTISSEMENT] Pesée aberrante (%.1fg). Re-synchro HX711...\n", total);
+    
+    scale1.power_down();
+    scale2.power_down();
+    delay(10);
+    scale1.power_up();
+    scale2.power_up();
+    
+    p1 = scale1.get_units(lectures);
+    p2 = scale2.get_units(lectures);
+    total = p1 + p2;
+  }
+
+  return total;
+}
+
+// ==========================================
+// ENVOI DU RÉSUMÉ BLE À LA CONNEXION
+// ==========================================
+void envoyerResumeBluetooth() {
+  float grainRestantG = lirePoidsTotal(5);
+  
+  logBT("\n==========================================");
+  logBT("    CONNECTÉ AU DISTRIBUTEUR DE GRAIN     ");
+  logBT("==========================================");
+  logBT("--- PARAMÈTRES ACTUELS ---");
+  logBT("Poids cible       : " + String(poidsCibleG, 1) + " g");
+  logBT("Timeout Max       : " + String(timeoutDistribMs / 1000) + " sec");
+  logBT("Seuil EMPTY       : " + String(seuilEmptyG, 1) + " g");
+  logBT("Intervalle EMPTY  : " + String(delaiEmptySec) + " sec");
+  logBT("Grain disponible  : " + String(grainRestantG / 1000.0, 3) + " kg (" + String(grainRestantG, 1) + " g)");
+  logBT("--- COMPTEURS PARTIELS ---");
+  logBT("Distributions     : " + String(nbDistributionsPartiel));
+  logBT("Total Extrait     : " + String(poidsPartielDistribueG / 1000.0, 3) + " kg");
+  logBT("--- COMPTEURS GLOBAUX ---");
+  logBT("Distributions     : " + String(nbDistributions));
+  logBT("Total Extrait     : " + String(poidsTotalDistribueG / 1000.0, 3) + " kg");
+  logBT("------------------------------------------");
+  logBT(STRING_AIDE_COMMANDES);
+  logBT("------------------------------------------\n");
 }
 
 // ==========================================
@@ -130,17 +176,22 @@ float lirePoidsTotal(uint8_t lectures = 3) {
 // ==========================================
 void verifierCommandesBluetooth() {
   if (commandeRecue.length() > 0) {
-    String commande = commandeRecue;
+    String cmd = commandeRecue;
     commandeRecue = ""; 
 
-    // 1. RUN
-    if (commande.equalsIgnoreCase("RUN")) {
-      logBT(">>> DEMANDE DE DISTRIBUTION MANUELLE (RUN) <<<");
+    cmd.trim();
+    cmd.toUpperCase();
+
+    if (cmd == "DISTRIBUTE") {
+      logBT(">>> DEMANDE DE DISTRIBUTION MANUELLE (DISTRIBUTE) <<<");
       executerCycleDistribution();
     }
-    // 2. TARE
-    else if (commande.equalsIgnoreCase("TARE")) {
-      logBT(">>> EXECUTION DE LA TARE (Trémie Vide) <<<");
+    else if (cmd == "EMPTY") {
+      logBT(">>> DEMANDE DE VIDAGE DE LA TRÉMIE (EMPTY) <<<");
+      viderTremie();
+    }
+    else if (cmd == "ZERO") {
+      logBT(">>> EXECUTION DE LA TARE (ZERO) <<<");
       scale1.tare(10);
       scale2.tare(10);
 
@@ -155,17 +206,14 @@ void verifierCommandesBluetooth() {
       logBT("SUCCES : Tare enregistree en FLASH !");
       logBT("Offset 1: " + String(offsetHX1) + " | Offset 2: " + String(offsetHX2));
 
-      // Remise à zéro des compteurs partiels lors de la tare
       reinitialiserCompteursPartiels();
       logBT("SUCCES : Compteurs partiels reinitialises !");
     } 
-    // 3. RESET (Réinitialisation manuelle du partiel)
-    else if (commande.equalsIgnoreCase("RESET")) {
+    else if (cmd == "CLEAR") {
       reinitialiserCompteursPartiels();
-      logBT(">>> SUCCES : Compteurs partiels reinitialises a zero ! <<<");
+      logBT(">>> SUCCES : Compteurs partiels reinitialises a zero (CLEAR) ! <<<");
     }
-    // 4. PESEE
-    else if (commande.equalsIgnoreCase("PESEE")) {
+    else if (cmd == "WEIGH") {
       float grainRestantG = lirePoidsTotal(5);
       float poidsBrutG = scale1.get_value(5) + scale2.get_value(5);
       
@@ -173,62 +221,157 @@ void verifierCommandesBluetooth() {
       logBT("Poids TOTAL BRUT (avec machinerie) : " + String(poidsBrutG / 1000.0, 3) + " kg (" + String(poidsBrutG, 1) + " g)");
       logBT("Poids NET de grain restant        : " + String(grainRestantG / 1000.0, 3) + " kg (" + String(grainRestantG, 1) + " g)");
     } 
-    // 5. CONFIG
-    else if (commande.equalsIgnoreCase("CONFIG")) {
+    else if (cmd == "SHOW") {
       logBT("=== CONFIGURATION ET STATISTIQUES ===");
       logBT("Poids cible       : " + String(poidsCibleG, 1) + " g");
       logBT("Timeout Distrib   : " + String(timeoutDistribMs / 1000) + " sec");
-      logBT("Attente BLE Init  : " + String(attenteBtSec) + " sec");
-      logBT("--- COMPTEURS PARTIELS (Dernier Reset) ---");
+      logBT("Seuil EMPTY       : " + String(seuilEmptyG, 1) + " g");
+      logBT("Intervalle EMPTY  : " + String(delaiEmptySec) + " sec");
+      logBT("--- COMPTEURS PARTIELS ---");
       logBT("Nb Distributions  : " + String(nbDistributionsPartiel));
-      logBT("Total Extrait     : " + String(poidsPartielDistribueG / 1000.0, 3) + " kg (" + String(poidsPartielDistribueG, 1) + " g)");
-      logBT("--- COMPTEURS GLOBAUX (A vie) ---");
+      logBT("Total Extrait     : " + String(poidsPartielDistribueG / 1000.0, 3) + " kg");
+      logBT("--- COMPTEURS GLOBAUX ---");
       logBT("Nb Distributions  : " + String(nbDistributions));
-      logBT("Total Extrait     : " + String(poidsTotalDistribueG / 1000.0, 3) + " kg (" + String(poidsTotalDistribueG, 1) + " g)");
+      logBT("Total Extrait     : " + String(poidsTotalDistribueG / 1000.0, 3) + " kg");
     } 
-    // 6. CIBLE=xxx
-    else if (commande.startsWith("CIBLE=") || commande.startsWith("cible=")) {
-      float nouvelleCible = commande.substring(6).toFloat();
-      if (nouvelleCible > 0.0) {
-        poidsCibleG = nouvelleCible;
-        preferences.begin("calibration", false);
-        preferences.putFloat("cible", poidsCibleG);
-        preferences.end();
-        logBT("SUCCES : Nouveau poids cible = " + String(poidsCibleG, 1) + " g");
-      } else {
-        logBT("ERREUR : Valeur cible invalide !");
+    else if (cmd.startsWith("SET_TARGET")) {
+      int indexEgal = cmd.indexOf('=');
+      if (indexEgal != -1) {
+        float val = cmd.substring(indexEgal + 1).toFloat();
+        if (val > 0.0) {
+          poidsCibleG = val;
+          preferences.begin("calibration", false);
+          preferences.putFloat("cible", poidsCibleG);
+          preferences.end();
+          logBT("SUCCES : Nouveau poids cible = " + String(poidsCibleG, 1) + " g");
+        } else logBT("ERREUR : Valeur cible invalide !");
       }
     } 
-    // 7. TIMEOUT=xx
-    else if (commande.startsWith("TIMEOUT=") || commande.startsWith("timeout=")) {
-      int secondes = commande.substring(8).toInt();
-      if (secondes > 0) {
-        timeoutDistribMs = (unsigned long)secondes * 1000;
-        preferences.begin("calibration", false);
-        preferences.putULong("timeout", timeoutDistribMs);
-        preferences.end();
-        logBT("SUCCES : Nouveau Timeout = " + String(secondes) + " sec");
-      } else {
-        logBT("ERREUR : Valeur de timeout invalide !");
+    else if (cmd.startsWith("SET_TIMEOUT")) {
+      int indexEgal = cmd.indexOf('=');
+      if (indexEgal != -1) {
+        int sec = cmd.substring(indexEgal + 1).toInt();
+        if (sec > 0) {
+          timeoutDistribMs = (unsigned long)sec * 1000;
+          preferences.begin("calibration", false);
+          preferences.putULong("timeout", timeoutDistribMs);
+          preferences.end();
+          logBT("SUCCES : Nouveau Timeout = " + String(sec) + " sec");
+        } else logBT("ERREUR : Valeur invalide !");
       }
     }
-    // 8. ATTENTE=xxx
-    else if (commande.startsWith("ATTENTE=") || commande.startsWith("attente=")) {
-      int secondes = commande.substring(8).toInt();
-      if (secondes >= 10) {
-        attenteBtSec = (unsigned long)secondes;
-        preferences.begin("calibration", false);
-        preferences.putULong("attente_bt", attenteBtSec);
-        preferences.end();
-        logBT("SUCCES : Nouvelle attente BLE = " + String(attenteBtSec) + " sec");
-      } else {
-        logBT("ERREUR : Temps trop court (min 10s) !");
+    else if (cmd.startsWith("SET_EMPTY_THRESHOLD")) {
+      int indexEgal = cmd.indexOf('=');
+      if (indexEgal != -1) {
+        float val = cmd.substring(indexEgal + 1).toFloat();
+        if (val > 0.0) {
+          seuilEmptyG = val;
+          preferences.begin("calibration", false);
+          preferences.putFloat("empty_th", seuilEmptyG);
+          preferences.end();
+          logBT("SUCCES : Seuil EMPTY = " + String(seuilEmptyG, 1) + " g");
+        } else logBT("ERREUR : Valeur invalide !");
+      }
+    }
+    else if (cmd.startsWith("SET_EMPTY_INTERVAL")) {
+      int indexEgal = cmd.indexOf('=');
+      if (indexEgal != -1) {
+        int sec = cmd.substring(indexEgal + 1).toInt();
+        if (sec > 0) {
+          delaiEmptySec = (unsigned long)sec;
+          preferences.begin("calibration", false);
+          preferences.putULong("empty_int", delaiEmptySec);
+          preferences.end();
+          logBT("SUCCES : Intervalle EMPTY = " + String(delaiEmptySec) + " sec");
+        } else logBT("ERREUR : Valeur invalide !");
       }
     }
     else {
       logBT(STRING_AIDE_COMMANDES);
     }
   }
+}
+
+// ==========================================
+// FONCTION DE VIDAGE DE LA TRÉMIE (EMPTY)
+// ==========================================
+void viderTremie() {
+  digitalWrite(PIN_RELAIS, LOW);
+
+  logBT("\n==========================================");
+  logBT("--- DEBUT DU VIDAGE DE LA TRÉMIE ---");
+  logBT("==========================================");
+
+  float poidsInitial = lirePoidsTotal(5);
+  logBT("Poids initial estime : " + String(poidsInitial, 1) + " g");
+  logBT("Parametres : Seuil = " + String(seuilEmptyG, 1) + "g | Intervalle = " + String(delaiEmptySec) + "s");
+
+  // Phase 1 : Rotation inconditionnelle du moteur pendant 15 secondes
+  logBT("Étape 1 : Démarrage moteur pendant 15 secondes...");
+  moteurAvant(PWM_DEMI_VITESSE);
+  
+  unsigned long chrono15s = millis();
+  bool interrompu = false;
+  
+  while (millis() - chrono15s < 15000) {
+    if (commandeRecue.length() > 0) {
+      logBT("Vidage interrompu par l'utilisateur pendant les 15s initiales.");
+      interrompu = true;
+      break;
+    }
+    delay(200);
+  }
+
+  // Phase 2 : Surveillance du poids après les 15s initiales
+  if (!interrompu) {
+    logBT("Étape 2 : Surveillance active de l'évolution du poids...");
+    float dernierPoids = lirePoidsTotal(3);
+    unsigned long chronoDerniereMesure = millis();
+
+    while (true) {
+      if (millis() - chronoDerniereMesure >= (delaiEmptySec * 1000)) {
+        chronoDerniereMesure = millis();
+        float poidsActuel = lirePoidsTotal(3);
+        float deltaPoids = abs(dernierPoids - poidsActuel);
+
+        logBT("Grain restant : " + String(poidsActuel, 1) + " g (Variation sur " + String(delaiEmptySec) + "s : " + String(deltaPoids, 1) + " g)");
+
+        // Seuil de tolérance atteint (ex: variation < 100g)
+        if (deltaPoids < seuilEmptyG) {
+          logBT("Vidage termine : variation inferieure au seuil de " + String(seuilEmptyG, 1) + " g sur " + String(delaiEmptySec) + "s.");
+          break;
+        }
+
+        // Trémie vide (<= 0g)
+        if (poidsActuel <= 0.0) {
+          logBT("Poids net <= 0g atteint.");
+          break;
+        }
+
+        dernierPoids = poidsActuel;
+      }
+
+      if (commandeRecue.length() > 0) {
+        logBT("Vidage interrompu par l'utilisateur.");
+        break;
+      }
+
+      delay(200);
+    }
+  }
+
+  // STOP SÉCURISÉ
+  stopperMoteur();
+
+  float poidsFinal = lirePoidsTotal(5);
+  float totalEvacue = poidsInitial - poidsFinal;
+  if (totalEvacue < 0) totalEvacue = 0;
+
+  logBT("\n==========================================");
+  logBT("--- VIDAGE TERMINÉ (STOP SÉCURISÉ) ---");
+  logBT("Total evacue : " + String(totalEvacue, 1) + " g");
+  logBT("Grain restant: " + String(poidsFinal, 1) + " g");
+  logBT("==========================================\n");
 }
 
 // ==========================================
@@ -258,15 +401,17 @@ void executerCycleDistribution() {
   unsigned long chronoDebut = millis();
   bool distributionReussie = false;
   float grainDistribue = 0.0;
+  int cpt = 0;
 
   while (millis() - chronoDebut < timeoutDistribMs) {
+    cpt++;
     float poidsActuel = lirePoidsTotal(1);
     grainDistribue = poidsInitialReference - poidsActuel;
 
     float pourcentage = (grainDistribue / poidsCibleG) * 100.0;
     if (pourcentage < 0) pourcentage = 0;
 
-    logBT("Extrait : " + String(grainDistribue, 1) + "g / " + String(poidsCibleG, 1) + "g (" + String(pourcentage, 0) + "%) | Grain Restant : " + String(poidsActuel / 1000.0, 2) + "kg");
+    logBT("[" + String(cpt) + "] Extrait : " + String(grainDistribue, 1) + "g / " + String(poidsCibleG, 1) + "g (" + String(pourcentage, 0) + "%) | Grain Restant : " + String(poidsActuel / 1000.0, 2) + "kg");
 
     if (grainDistribue >= poidsCibleG) {
       distributionReussie = true;
@@ -285,14 +430,12 @@ void executerCycleDistribution() {
   if (distributionReussie) {
     float debitGparSec = grainDistribue / (dureeDistributionMs / 1000.0);
 
-    // Mise à jour des compteurs (Globaux + Partiels)
     nbDistributions++;
     poidsTotalDistribueG += grainDistribue;
     
     nbDistributionsPartiel++;
     poidsPartielDistribueG += grainDistribue;
 
-    // Sauvegarde en FLASH
     preferences.begin("calibration", false);
     preferences.putULong("nb_distrib", nbDistributions);
     preferences.putFloat("tot_poids", poidsTotalDistribueG);
@@ -305,7 +448,6 @@ void executerCycleDistribution() {
     logBT("Temps d'extraction: " + String(dureeDistributionMs / 1000.0, 1) + " sec");
     logBT("Debit moyen       : " + String(debitGparSec, 1) + " g/sec");
 
-    // Lecture brute (sans offset de tare) et lecture nette (avec offset de tare)
     float poidsBrutTotal = scale1.get_value(5) + scale2.get_value(5);
     float grainFinal = lirePoidsTotal(5);
 
@@ -350,7 +492,6 @@ void setup() {
 
   Serial.println("\n=== Distributeur de Grain (BLE iOS / Android) ===");
 
-  // Initialisation BLE
   BLEDevice::init("DISTRIBUTEUR-GRAIN");
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
@@ -372,7 +513,6 @@ void setup() {
   pService->start();
   pServer->getAdvertising()->start();
 
-  // Config Pins & PWM
   pinMode(PIN_AV_PLUS, OUTPUT);
   pinMode(PIN_AV_MOINS, OUTPUT);
   pinMode(PIN_AR_PLUS, OUTPUT);
@@ -384,19 +524,18 @@ void setup() {
   analogWriteFrequency(PWM_FREQ);
   analogWriteResolution(PWM_RES);
 
-  // Balances
   scale1.begin(HX1_DT, HX1_SCK);
   scale2.begin(HX2_DT, HX2_SCK);
   scale1.set_scale(CALIB_HX1);
   scale2.set_scale(CALIB_HX2);
 
-  // Chargement FLASH
   preferences.begin("calibration", true);
   offsetHX1              = preferences.getLong("off1", 0);
   offsetHX2              = preferences.getLong("off2", 0);
   poidsCibleG            = preferences.getFloat("cible", DEFAULT_POIDS_CIBLE_G);
   timeoutDistribMs       = preferences.getULong("timeout", DEFAULT_TIMEOUT_MS);
-  attenteBtSec           = preferences.getULong("attente_bt", DEFAULT_ATTENTE_BT_SEC);
+  seuilEmptyG            = preferences.getFloat("empty_th", DEFAULT_EMPTY_THRESHOLD_G);
+  delaiEmptySec          = preferences.getULong("empty_int", DEFAULT_EMPTY_INTERVAL_SEC);
   nbDistributions        = preferences.getULong("nb_distrib", 0);
   poidsTotalDistribueG   = preferences.getFloat("tot_poids", 0.0);
   nbDistributionsPartiel = preferences.getULong("nb_partiel", 0);
@@ -406,32 +545,15 @@ void setup() {
   scale1.set_offset(offsetHX1);
   scale2.set_offset(offsetHX2);
 
-  // Affichage des paramètres & statistiques au démarrage USB
   Serial.println("\n--- CHARGEMENT PARAMÈTRES & STATISTIQUES ---");
   Serial.printf("Offsets : Off1=%ld | Off2=%ld\n", offsetHX1, offsetHX2);
-  Serial.printf("Parametres : Cible=%.1fg | Timeout=%lums | AttenteBT=%lus\n", poidsCibleG, timeoutDistribMs, attenteBtSec);
-  Serial.printf("Partiel : %lu distrib. | Total : %.3f kg\n", nbDistributionsPartiel, poidsPartielDistribueG / 1000.0);
-  Serial.printf("Global  : %lu distrib. | Total : %.3f kg\n", nbDistributions, poidsTotalDistribueG / 1000.0);
+  Serial.printf("Parametres : Cible=%.1fg | Timeout=%lums | SeuilEmpty=%.1fg | IntEmpty=%lus\n", 
+                poidsCibleG, timeoutDistribMs, seuilEmptyG, delaiEmptySec);
 
-  // --- FENÊTRE DE CONFIGURATION BLE AVANT CYCLE D'ALLUMAGE ---
-  Serial.printf("\n>>> Attente de %lu sec : Connectez votre iPhone 13 en BLE...\n", attenteBtSec);
-  
-  unsigned long chronoAttente = millis();
-  unsigned long dernierAffichage = 0;
-
-  while (millis() - chronoAttente < (attenteBtSec * 1000)) {
-    verifierCommandesBluetooth();
-
-    if (millis() - dernierAffichage >= 10000) {
-      unsigned long resteSec = attenteBtSec - ((millis() - chronoAttente) / 1000);
-      Serial.printf("Temps BLE restant : %lu sec...\n", resteSec);
-      dernierAffichage = millis();
-    }
-    delay(50);
-  }
-
-  // --- PREMIER CYCLE AUTOMATIQUE DU DÉMARRAGE ---
+  Serial.println("\n>>> DISTRIBUTION AUTOMATIQUE DU DÉMARRAGE <<<");
   executerCycleDistribution();
+
+  Serial.println("\nPrêt ! En attente de commande BLE...");
 }
 
 void loop() {
@@ -440,8 +562,15 @@ void loop() {
     pServer->startAdvertising();
     oldDeviceConnected = deviceConnected;
   }
+  
+  // Nouvelle détection de connexion avec temporisation
   if (deviceConnected && !oldDeviceConnected) {
     oldDeviceConnected = deviceConnected;
+
+    delay(5000); 
+
+    logBT("=== CONNECTE AU DISTRIBUTEUR ===");
+    envoyerResumeBluetooth();
   }
 
   verifierCommandesBluetooth();
